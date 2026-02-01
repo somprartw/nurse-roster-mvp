@@ -1,0 +1,553 @@
+"use client";
+
+import * as React from "react";
+
+type ViewMode = "my" | "ward";
+
+type MeResponse = {
+  staff: { id: string; org_id: string; display_name: string };
+  wards: Array<{ ward_id: string; primary_ward: boolean | null }>;
+};
+
+type ShiftRow = {
+  role_in_shift: "senior" | "junior" | "nurse_aid" | "admin" | string | null;
+
+  shift_instance_id: string;
+  shift_date: string; // YYYY-MM-DD
+  ward_id: string;
+
+  shift_name: string | null;
+  shift_code: "morning" | "evening" | "night" | "ot" | string | null;
+
+  start_time: string | null; // "08:00:00"
+  end_time: string | null; // "16:00:00"
+  cross_midnight: boolean | null;
+
+  risk_flag: boolean | null;
+  note: string | null;
+};
+
+function cx(...classes: Array<string | false | null | undefined>) {
+  return classes.filter(Boolean).join(" ");
+}
+
+function todayISO() {
+  const dt = new Date();
+  const y = dt.getFullYear();
+  const m = String(dt.getMonth() + 1).padStart(2, "0");
+  const d = String(dt.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+
+function formatDateTH(yyyyMmDd: string) {
+  const [y, m, d] = yyyyMmDd.split("-").map((n) => Number(n));
+  const dt = new Date(y, m - 1, d);
+  return dt.toLocaleDateString("th-TH", { weekday: "short", day: "2-digit", month: "short" });
+}
+
+function hhmm(t: string | null) {
+  if (!t) return "--:--";
+  return t.slice(0, 5);
+}
+
+function timeRange(start: string | null, end: string | null, crossMidnight?: boolean | null) {
+  const s = hhmm(start);
+  const e = hhmm(end);
+  return crossMidnight ? `${s}–${e} (+1)` : `${s}–${e}`;
+}
+
+function shiftLabel(row: ShiftRow) {
+  const code = row.shift_code ?? "";
+  const map: Record<string, string> = { morning: "Morning", evening: "Evening", night: "Night", ot: "OT" };
+  return row.shift_name ?? map[code] ?? "Shift";
+}
+
+function roleChip(role?: string | null) {
+  if (!role) return null;
+  const map: Record<string, string> = { senior: "Senior", junior: "Junior", nurse_aid: "Aide", admin: "Admin" };
+  return map[role] ?? role;
+}
+
+function StatusBadge({ risk }: { risk: boolean }) {
+  return (
+    <span
+      className={cx(
+        "inline-flex items-center rounded-full px-2 py-0.5 text-xs ring-1 ring-inset",
+        risk ? "bg-amber-50 text-amber-800 ring-amber-200" : "bg-slate-100 text-slate-700 ring-slate-200"
+      )}
+    >
+      {risk ? "⚠️ Risk" : "OK"}
+    </span>
+  );
+}
+
+function BottomSheet({
+  open,
+  title,
+  children,
+  onClose,
+}: {
+  open: boolean;
+  title: string;
+  children: React.ReactNode;
+  onClose: () => void;
+}) {
+  if (!open) return null;
+
+  return (
+    <div className="fixed inset-0 z-50">
+      <div
+        onClick={onClose}
+        className="absolute inset-0 bg-slate-800/25"
+        role="button"
+        tabIndex={0}
+        aria-label="Close overlay"
+      />
+
+      <div className="absolute bottom-0 left-0 right-0 max-h-[85dvh] overflow-hidden rounded-t-3xl bg-white shadow-2xl">
+        <div className="flex items-center justify-between border-b border-slate-200 px-5 py-4">
+          <div className="text-base font-semibold text-slate-900">{title}</div>
+          <button
+            onClick={onClose}
+            className="rounded-full px-3 py-1.5 text-sm text-slate-700 ring-1 ring-inset ring-slate-200 hover:bg-slate-50"
+          >
+            Close
+          </button>
+        </div>
+        <div className="overflow-auto px-5 py-4">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+async function fetchJSON<T>(url: string): Promise<T> {
+  const res = await fetch(url, { credentials: "include" });
+  if (!res.ok) {
+    const msg = await res.text();
+    throw new Error(msg || `Request failed: ${res.status}`);
+  }
+  return res.json() as Promise<T>;
+}
+
+export default function StaffMobilePage() {
+  const [mode, setMode] = React.useState<ViewMode>("my"); // demo: focus my
+  const [me, setMe] = React.useState<MeResponse | null>(null);
+  const [wardId, setWardId] = React.useState<string | null>(null);
+
+  const [rows, setRows] = React.useState<ShiftRow[]>([]);
+  const [loading, setLoading] = React.useState(true);
+  const [err, setErr] = React.useState<string | null>(null);
+
+  const [activeId, setActiveId] = React.useState<string | null>(null);
+  const [sheetOpen, setSheetOpen] = React.useState(false);
+
+  const from = React.useMemo(() => todayISO(), []);
+  const limit = 14;
+
+  // Load /me once
+  React.useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        setErr(null);
+        const data = await fetchJSON<MeResponse>("/api/m/me");
+        if (cancelled) return;
+        setMe(data);
+
+        const primary = data.wards.find((w) => w.primary_ward) ?? data.wards[0];
+        setWardId(primary?.ward_id ?? null);
+      } catch {
+        if (cancelled) return;
+        setErr("โหลดข้อมูลผู้ใช้ไม่สำเร็จ (อาจยังไม่ login หรือยังไม่มี staff record)");
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Load shifts (My only for demo)
+  React.useEffect(() => {
+    if (!me) return;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        setLoading(true);
+        setErr(null);
+
+        const qs = new URLSearchParams();
+        qs.set("from", from);
+        qs.set("limit", String(limit));
+
+        // demo: Ward mode ปิดไว้ก่อน (จะทำ endpoint แยกได้ทีหลัง)
+        // if (mode === "ward" && wardId) qs.set("wardId", wardId);
+
+        const out = await fetchJSON<{ data: ShiftRow[] }>(`/api/m/shifts?${qs.toString()}`);
+        if (cancelled) return;
+
+        setRows(out.data ?? []);
+      } catch {
+        if (cancelled) return;
+        setErr("โหลดตารางเวรไม่สำเร็จ (เช็ค API / RLS / mapping staff.user_id)");
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [me, mode, wardId, from]);
+
+  const upcoming = React.useMemo(() => {
+    return [...rows]
+      .sort((a, b) => {
+        const d = a.shift_date.localeCompare(b.shift_date);
+        if (d !== 0) return d;
+        return (a.start_time ?? "").localeCompare(b.start_time ?? "");
+      })
+      .slice(0, 14);
+  }, [rows]);
+
+  const todayRow = React.useMemo(() => {
+    const t = todayISO();
+    return upcoming.find((r) => r.shift_date === t) ?? null;
+  }, [upcoming]);
+
+  const active = React.useMemo(() => {
+    return rows.find((r) => r.shift_instance_id === activeId) ?? null;
+  }, [rows, activeId]);
+
+  function openDetails(id: string) {
+    setActiveId(id);
+    setSheetOpen(true);
+  }
+
+  function myRoleInShift(row: ShiftRow) {
+    return row.role_in_shift ?? null;
+  }
+
+  async function logout() {
+    try {
+      await fetch("/api/auth/logout", { method: "POST" });
+    } finally {
+      window.location.href = "/login";
+    }
+  }
+
+  const staffName = me?.staff.display_name ?? "—";
+
+  return (
+    // ✅ KEY: ปิด window scroll + ทำให้ scroll อยู่ใน <main> เท่านั้น (ลด URL bar เด้งบนมือถือ)
+    <div
+      className="flex h-[100dvh] flex-col overflow-hidden bg-background"
+      style={{ paddingTop: "env(safe-area-inset-top)" }}
+    >
+      {/* Header (นิ่ง) */}
+      <div className="flex-none border-b border-slate-200 bg-white/90 backdrop-blur">
+        <div className="mx-auto max-w-md px-5 py-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <div className="text-xs text-slate-500">Staff</div>
+              <div className="text-lg font-semibold text-slate-900">{mode === "my" ? "My Shifts" : "Ward Shifts"}</div>
+            </div>
+            <div className="text-right">
+              <div className="text-xs text-slate-500">Logged in</div>
+              <div className="text-sm font-medium text-slate-900">{staffName}</div>
+            </div>
+          </div>
+
+          {/* Toggle */}
+          <div className="mt-3 grid grid-cols-2 gap-2 rounded-2xl bg-slate-100 p-1">
+            <button
+              onClick={() => setMode("my")}
+              className={cx(
+                "rounded-2xl px-4 py-2.5 text-sm font-semibold",
+                mode === "my" ? "bg-white text-slate-900 shadow-sm" : "text-slate-600"
+              )}
+            >
+              👤 My
+            </button>
+
+            <button
+              onClick={() => setMode("ward")}
+              className={cx(
+                "rounded-2xl px-4 py-2.5 text-sm font-semibold",
+                mode === "ward" ? "bg-white text-slate-900 shadow-sm" : "text-slate-600"
+              )}
+              disabled={true}
+              title="Demo นี้โฟกัส My ก่อน (Ward mode จะทำ endpoint แยกทีหลัง)"
+            >
+              🏥 Ward
+            </button>
+          </div>
+
+          {/* Ward selector (kept for future, but hidden because ward mode disabled) */}
+          {mode === "ward" && (
+            <div className="mt-3">
+              <div className="text-xs text-slate-500">Select ward</div>
+              <select
+                value={wardId ?? ""}
+                onChange={(e) => setWardId(e.target.value)}
+                className="mt-1 w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none focus:ring-2 focus:ring-primary/20"
+              >
+                {(me?.wards ?? []).map((w) => (
+                  <option key={w.ward_id} value={w.ward_id}>
+                    {w.primary_ward ? "⭐ Primary ward" : "Ward"} • {w.ward_id.slice(0, 8)}
+                  </option>
+                ))}
+              </select>
+              <div className="mt-1 text-[11px] text-slate-500">* Ward mode จะเปิดในสเต็ปถัดไป</div>
+            </div>
+          )}
+
+          {/* quick actions row */}
+          <div className="mt-3 grid grid-cols-2 gap-2">
+            <button
+              onClick={() => {
+                if (todayRow) openDetails(todayRow.shift_instance_id);
+              }}
+              className={cx(
+                "rounded-2xl px-4 py-3 text-sm font-medium ring-1 ring-inset transition",
+                todayRow ? "bg-primary text-white ring-primary hover:opacity-90" : "bg-slate-100 text-slate-400 ring-slate-200"
+              )}
+              disabled={!todayRow}
+            >
+              ✅ Today
+            </button>
+
+            <button
+              onClick={() => {
+                document.getElementById("upcoming")?.scrollIntoView({ behavior: "smooth", block: "start" });
+              }}
+              className="rounded-2xl bg-white px-4 py-3 text-sm font-medium text-slate-900 ring-1 ring-inset ring-slate-200 hover:bg-slate-50"
+            >
+              📅 Upcoming
+            </button>
+          </div>
+
+          {err && (
+            <div className="mt-3 rounded-2xl bg-rose-50 px-4 py-3 text-sm text-rose-700 ring-1 ring-rose-200">
+              {err}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Content (สกรอลล์เฉพาะตรงนี้) */}
+      <main className="flex-1 overflow-y-auto [-webkit-overflow-scrolling:touch]">
+        <div className="mx-auto max-w-md px-5 py-5">
+          {/* Today card */}
+          <div className="rounded-3xl border border-slate-200 bg-white p-4 shadow-sm">
+            {/* accent bar */}
+            <div className="mb-3 h-1 w-14 rounded-full bg-primary/20" />
+
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <div className="text-sm text-slate-500">Today</div>
+                <div className="text-base font-semibold text-slate-900">
+                  {todayRow ? `${shiftLabel(todayRow)} • ${formatDateTH(todayRow.shift_date)}` : "No shift today"}
+                </div>
+
+                <div className="mt-1 text-sm text-slate-600">
+                  {todayRow
+                    ? timeRange(todayRow.start_time, todayRow.end_time, todayRow.cross_midnight)
+                    : upcoming?.[0]
+                    ? `Next: ${formatDateTH(upcoming[0].shift_date)}`
+                    : "—"}
+                </div>
+
+                {todayRow && mode === "my" && (
+                  <div className="mt-1 text-xs text-slate-500">My role: {roleChip(myRoleInShift(todayRow)) ?? "—"}</div>
+                )}
+              </div>
+
+              <StatusBadge risk={Boolean(todayRow?.risk_flag)} />
+            </div>
+
+            <div className="mt-4">
+              <button
+                onClick={() => {
+                  if (!todayRow) return;
+                  openDetails(todayRow.shift_instance_id);
+                }}
+                className={cx(
+                  "w-full rounded-2xl px-4 py-3 text-sm font-semibold ring-1 ring-inset transition",
+                  todayRow
+                    ? "bg-primary-soft text-slate-900 ring-primary/20 hover:bg-primary-soft/80"
+                    : "bg-slate-100 text-slate-400 ring-slate-200"
+                )}
+                disabled={!todayRow}
+              >
+                View details
+              </button>
+            </div>
+
+            <div className="mt-3 text-xs text-slate-500">
+              * Confirm / Can’t make it: เดี๋ยวเราเชื่อมกับ leave_requests / response table ในสเต็ปถัดไป
+            </div>
+          </div>
+
+          {/* Upcoming list */}
+          <div id="upcoming" className="mt-5">
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="text-sm text-slate-500">Schedule</div>
+                <div className="text-base font-semibold text-slate-900">
+                  {mode === "my" ? "Upcoming (My)" : "Upcoming (Ward)"}
+                </div>
+              </div>
+              <div className="text-xs text-slate-500">Next 14 shifts</div>
+            </div>
+
+            {loading ? (
+              <div className="mt-3 rounded-3xl border border-slate-200 bg-white p-4 text-sm text-slate-600 shadow-sm">
+                Loading...
+              </div>
+            ) : upcoming.length === 0 ? (
+              <div className="mt-3 rounded-3xl border border-slate-200 bg-white p-4 text-sm text-slate-600 shadow-sm">
+                ยังไม่มีเวรถัดไป (หรือไม่มีสิทธิ์เข้าถึงข้อมูล)
+              </div>
+            ) : (
+              <div className="mt-3 space-y-2">
+                {upcoming.map((r) => {
+                  const meRole = mode === "my" ? myRoleInShift(r) : null;
+                  const isToday = r.shift_date === todayISO();
+                  const isMine = mode === "my";
+
+                  return (
+                    <button
+                      key={r.shift_instance_id}
+                      onClick={() => openDetails(r.shift_instance_id)}
+                      className={cx(
+                        "w-full rounded-3xl border p-4 text-left shadow-sm transition",
+                        isMine ? "border-slate-200 bg-primary-soft hover:bg-primary-soft/80" : "border-slate-200 bg-white hover:bg-slate-50",
+                        isToday ? "ring-2 ring-primary/20" : ""
+                      )}
+                    >
+                      <div className="flex items-start gap-3">
+                        {isMine && <div className="mt-1 h-10 w-1.5 rounded-full bg-primary" />}
+
+                        <div className="flex min-w-0 flex-1 items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="text-sm text-slate-500">{formatDateTH(r.shift_date)}</div>
+                            <div className="truncate text-base font-semibold text-slate-900">
+                              {shiftLabel(r)}{" "}
+                              <span className="text-sm font-medium text-slate-500">
+                                • {timeRange(r.start_time, r.end_time, r.cross_midnight)}
+                              </span>
+                            </div>
+
+                            {mode === "my" ? (
+                              <div className="mt-1 text-sm text-slate-600">My role: {roleChip(meRole) ?? "—"}</div>
+                            ) : (
+                              <div className="mt-1 text-sm text-slate-600">Ward mode (coming soon)</div>
+                            )}
+
+                            {r.note && <div className="mt-2 text-xs text-slate-500">Note: {r.note}</div>}
+                          </div>
+
+                          <div className="flex flex-col items-end gap-2">
+                            <StatusBadge risk={Boolean(r.risk_flag)} />
+                            {r.shift_code && (
+                              <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-700 ring-1 ring-inset ring-slate-200">
+                                {String(r.shift_code).toUpperCase()}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* กันท้าย list ไม่โดน Bottom nav ทับ (เผื่อ safe-area ด้วย) */}
+          <div style={{ height: "calc(92px + env(safe-area-inset-bottom))" }} />
+        </div>
+      </main>
+
+      {/* Bottom nav (นิ่ง + ไม่เล็กเกินไป) */}
+      <div className="flex-none border-t border-slate-200 bg-white" style={{ paddingBottom: "env(safe-area-inset-bottom)" }}>
+        <div className="mx-auto grid max-w-md grid-cols-4 gap-2 px-5 py-3">
+          <button className="min-h-11 rounded-2xl bg-primary px-3 py-2.5 text-[13px] font-semibold text-white hover:opacity-90">
+            🏠 Home
+          </button>
+
+          <button
+            className="min-h-11 rounded-2xl bg-white px-3 py-2.5 text-[13px] font-semibold text-slate-900 ring-1 ring-inset ring-slate-200 hover:bg-slate-50"
+            onClick={() => alert("Demo: Alerts")}
+          >
+            🔔 Alerts
+          </button>
+
+          <button
+            className="min-h-11 rounded-2xl bg-white px-3 py-2.5 text-[13px] font-semibold text-slate-900 ring-1 ring-inset ring-slate-200 hover:bg-slate-50"
+            onClick={() => alert("Demo: Me")}
+          >
+            👤 Me
+          </button>
+
+          <button
+            className="min-h-11 rounded-2xl bg-rose-50 px-3 py-2.5 text-[13px] font-semibold text-rose-700 ring-1 ring-inset ring-rose-200 hover:bg-rose-100"
+            onClick={logout}
+          >
+            🚪 Logout
+          </button>
+        </div>
+      </div>
+
+      {/* Details sheet */}
+      <BottomSheet
+        open={sheetOpen}
+        title="Shift details"
+        onClose={() => {
+          setSheetOpen(false);
+          setActiveId(null);
+        }}
+      >
+        {!active ? (
+          <div className="text-sm text-slate-600">No data</div>
+        ) : (
+          <div className="space-y-3">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <div className="text-xs text-slate-500">{formatDateTH(active.shift_date)}</div>
+                <div className="text-lg font-semibold text-slate-900">{shiftLabel(active)}</div>
+                <div className="text-sm text-slate-600">
+                  {timeRange(active.start_time, active.end_time, active.cross_midnight)}
+                </div>
+                {mode === "my" && (
+                  <div className="mt-1 text-xs text-slate-500">My role: {roleChip(myRoleInShift(active)) ?? "—"}</div>
+                )}
+                <div className="mt-1 text-xs text-slate-500">Ward: {active.ward_id?.slice(0, 8) ?? "—"}</div>
+              </div>
+              <StatusBadge risk={Boolean(active.risk_flag)} />
+            </div>
+
+            {active.note && (
+              <div className="rounded-2xl bg-slate-50 p-3 ring-1 ring-inset ring-slate-200">
+                <div className="text-xs text-slate-500">Note</div>
+                <div className="text-sm text-slate-900">{active.note}</div>
+              </div>
+            )}
+
+            <div className="rounded-2xl bg-amber-50 p-3 ring-1 ring-inset ring-amber-200">
+              <div className="text-sm font-semibold text-amber-900">Next step</div>
+              <div className="mt-1 text-xs text-amber-800">
+                ปุ่ม Confirm / Can’t make it จะต่อเข้าตาราง leave_requests หรือ staff_shift_responses (ทำให้ scheduler เห็นและจัดการได้)
+              </div>
+            </div>
+
+            <div className="text-[11px] text-slate-500">
+              * Demo นี้ใช้ “My shifts (Next 14 shifts)” ก่อน — ถ้าจะโชว์รายชื่อคนทั้งกะ เราจะทำ Ward endpoint แยกในสเต็ปถัดไป
+            </div>
+          </div>
+        )}
+      </BottomSheet>
+    </div>
+  );
+}
