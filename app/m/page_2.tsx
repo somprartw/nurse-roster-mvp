@@ -3,11 +3,11 @@
 
 import * as React from "react";
 import { CenterModal } from "./components/center-modal";
-import { ShiftCard, ShiftCardRow, getShiftKind } from "./components/shift-card";
-import { TodayShiftCard } from "./components/today-shift-card";
+import { ShiftCard, ShiftCardRow } from "./components/shift-card";
+import { isOT, roundEmoji } from "./components/shift-icons";
 import { monthFromOffset, WardCalendar } from "./components/ward-calendar";
 import { ShiftDetailView } from "./components/shift-detail-view";
-import { formatDateTH } from "./components/shift-utils";
+import { formatDateTH, timeRange } from "./components/shift-utils";
 
 type ViewMode = "my" | "ward";
 type NavKey = "home" | "alerts" | "me";
@@ -389,7 +389,7 @@ export default function MobileStaffPage() {
           [key]: { data: out.data, ts: Date.now(), etag, lastModified },
         }));
       } catch {
-        // เงียบไว้ก่อนเพื่อไม่ทำ UX พัง
+        // เงียบไว้ก่อนเพื่อไม่ทำ UX พัง (แต่ถ้าต้องการโชว์ error ค่อยเปิด)
       } finally {
         inFlightRef.current[key] = false;
       }
@@ -397,7 +397,7 @@ export default function MobileStaffPage() {
     [wardCache]
   );
 
-  /** ✅ Prefetch: prev/current/next */
+  /** ✅ Prefetch: prev/current/next (อุ่นเครื่องให้สลับโหมดไว) */
   React.useEffect(() => {
     if (!me || !wardId) return;
     const m0 = monthFromOffset(0).month;
@@ -408,14 +408,14 @@ export default function MobileStaffPage() {
     void fetchWardMonthConditional(wardId, mNext, false);
   }, [me, wardId, fetchWardMonthConditional]);
 
-  /** ✅ เมื่อ monthOffset เปลี่ยน -> prefetch เดือนนั้น */
+  /** ✅ เมื่อ monthOffset เปลี่ยน -> prefetch เดือนนั้น (แต่ไม่บังคับ) */
   React.useEffect(() => {
     if (!me || !wardId) return;
     const { month } = monthFromOffset(monthOffset);
     void fetchWardMonthConditional(wardId, month, false);
   }, [me, wardId, monthOffset, fetchWardMonthConditional]);
 
-  /** ✅ Sync wardMonth จาก cache */
+  /** ✅ Sync wardMonth จาก cache (ทันทีที่มี) */
   React.useEffect(() => {
     if (!me || !wardId) return;
 
@@ -435,6 +435,7 @@ export default function MobileStaffPage() {
       return;
     }
 
+    // ถ้าเข้าหน้า ward แล้ว cache ยังไม่มา ค่อยแสดง loading แบบเบาๆ
     if (mode === "ward") {
       setWardLoading(true);
       (async () => {
@@ -464,30 +465,6 @@ export default function MobileStaffPage() {
     return Object.entries(map)
       .sort((a, b) => a[0].localeCompare(b[0]))
       .map(([date, count]) => ({ date, count }));
-  }, [wardMonth, me]);
-
-  // ✅ NEW: kindCountsByDate สำหรับแถบสีแบบสัดส่วนใน Calendar
-  const myWardKindCountsByDate = React.useMemo(() => {
-    if (!wardMonth || !me) {
-      return {} as Record<string, { morning: number; afternoon: number; night: number }>;
-    }
-
-    const myId = me.staff.id;
-    const out: Record<string, { morning: number; afternoon: number; night: number }> = {};
-
-    for (const s of wardMonth.shifts ?? []) {
-      const sid = (s as any).staff_id ?? null;
-      const d = String((s as any).shift_date ?? "");
-      if (!d) continue;
-      if (sid !== myId) continue;
-
-      const kind = getShiftKind(s); // "morning" | "afternoon" | "night"
-      const cur = out[d] ?? { morning: 0, afternoon: 0, night: 0 };
-      cur[kind] += 1;
-      out[d] = cur;
-    }
-
-    return out;
   }, [wardMonth, me]);
 
   // Set selectedDate default เมื่อ wardMonth มาแล้ว
@@ -581,15 +558,17 @@ export default function MobileStaffPage() {
     }
   }, [me, wardId, mode, monthOffset, refreshing, loadMyShifts, fetchWardMonthConditional]);
 
-  /** ✅ Refresh ตอนกลับมาอยู่หน้าจอ */
+  /** ✅ Refresh ตอนกลับมาอยู่หน้าจอ: เช็ค TTL ก่อน (ประหยัดสุด) + กันยิงซ้ำ */
   const lastVisibleRef = React.useRef<number>(0);
   const refreshOnVisibleIfNeeded = React.useCallback(async () => {
     if (!me || !wardId) return;
 
+    // กันเด้งรัว (เช่น WebView trigger แปลกๆ)
     const now = Date.now();
     if (now - lastVisibleRef.current < 30_000) return; // 30s throttle
     lastVisibleRef.current = now;
 
+    // ไม่ force: จะได้ 304 หรือใช้ cache ถ้ายังสด
     if (mode === "my") {
       await loadMyShifts(false);
     } else {
@@ -621,14 +600,7 @@ export default function MobileStaffPage() {
   const multiWard = (me?.wards ?? []).length > 1;
 
   return (
-    <div
-      className="bg-background"
-      style={{
-        paddingTop: "env(safe-area-inset-top)",
-        background:
-          "radial-gradient(1200px 600px at 50% -100px, rgba(99,102,241,.10), transparent 60%), linear-gradient(#f8fafc, #f1f5f9)",
-      }}
-    >
+    <div className="bg-background" style={{ paddingTop: "env(safe-area-inset-top)" }}>
       <div className="mx-auto flex h-[100dvh] w-full max-w-md flex-col overflow-hidden bg-background">
         {/* Header */}
         <div className="flex-none border-b border-slate-200 bg-white/90 backdrop-blur">
@@ -734,45 +706,47 @@ export default function MobileStaffPage() {
           </div>
         </div>
 
-        {/* My: Today (Hero) */}
+        {/* My: Today card */}
         {mode === "my" ? (
-          <div className="flex-none">
-            <div className="px-5 pt-4 pb-2">
-              {/* separator แบบเงียบๆ ให้ Today มาก่อนโดยไม่แย่งซีน */}
-              <div className="flex items-center gap-3">
-                <div className="h-px flex-1 bg-slate-200/80" />
-                <div className="text-sm font-medium text-slate-500">
-                  Today • {todayRow ? formatDateTH(todayRow.shift_date) : formatDateTH(todayISO())}
+          <div className="flex-none bg-background">
+            <div className="space-y-3 px-5 py-4">
+              <div className="rounded-3xl border border-slate-200 bg-white p-4 shadow-sm">
+                <div className="mb-3 h-1 w-14 rounded-full bg-primary/20" />
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <div className="text-sm text-slate-500">Today</div>
+                    <div className="text-base font-semibold text-slate-900">
+                      {todayRow ? `${todayRow.shift_name ?? "Shift"} • ${formatDateTH(todayRow.shift_date)}` : "No shift today"}
+                    </div>
+                    <div className="mt-1 text-sm text-slate-600">
+                      {todayRow ? timeRange(todayRow.start_time, todayRow.end_time, todayRow.cross_midnight) : "—"}
+                    </div>
+                    {todayRow ? (
+                      <div className="mt-2 flex items-center gap-2">
+                        <span className="text-lg" aria-hidden>
+                          {isOT(todayRow.shift_code) ? "🕒" : roundEmoji(todayRow.shift_code)}
+                        </span>
+                        {isOT(todayRow.shift_code) ? <span className="text-xs text-slate-500">OT</span> : null}
+                      </div>
+                    ) : null}
+                  </div>
+                  <StatusBadge risk={Boolean(todayRow?.risk_flag)} />
                 </div>
-                <div className="h-px flex-1 bg-slate-200/80" />
-              </div>
 
-              <div className="mt-4">
-                {todayRow ? (
-                  <TodayShiftCard
-                    row={{ ...todayRow, ward_name: wardNameById[todayRow.ward_id] ?? null }}
-                    onClick={() => openShift(todayRow.shift_instance_id)}
-                    rightBadge={
-                      <span className="inline-flex items-center gap-2 rounded-full bg-white/70 px-3 py-1 text-sm text-slate-700 ring-1 ring-slate-200/70">
-                        <span className="h-2 w-2 rounded-full bg-emerald-500" />
-                        ยืนยันแล้ว
-                      </span>
-                    }
-                  />
-                ) : (
+                <div className="mt-4">
                   <button
-                    type="button"
-                    disabled
+                    onClick={() => openShift(todayRow?.shift_instance_id)}
                     className={cx(
-                      "w-full text-left rounded-[26px] border border-slate-200/70 bg-white px-5 py-5",
-                      "min-h-[120px] opacity-70 shadow-[0_10px_28px_rgba(2,6,23,.06)]"
+                      "w-full rounded-2xl px-4 py-3 text-sm font-semibold ring-1 ring-inset transition",
+                      todayRow
+                        ? "bg-primary-soft text-slate-900 ring-primary/20 hover:bg-primary-soft/80"
+                        : "bg-slate-100 text-slate-400 ring-slate-200"
                     )}
+                    disabled={!todayRow}
                   >
-                    <div className="text-base font-medium text-slate-500">Today</div>
-                    <div className="mt-3 text-2xl font-semibold text-slate-900">No shift today</div>
-                    <div className="mt-2 text-sm text-slate-500">{formatDateTH(todayISO())}</div>
+                    ดูรายละเอียด
                   </button>
-                )}
+                </div>
               </div>
             </div>
           </div>
@@ -790,8 +764,8 @@ export default function MobileStaffPage() {
               <div>
                 <div className="flex items-center justify-between">
                   <div>
-                    <div className="text-sm font-medium text-slate-500">Upcoming</div>
-                    <div className="text-base font-semibold text-slate-900">Next shifts</div>
+                    <div className="text-sm text-slate-500">Next</div>
+                    <div className="text-base font-semibold text-slate-900">Next 14 Shifts</div>
                   </div>
                   <div className="text-xs text-slate-500">scroll ได้</div>
                 </div>
@@ -805,13 +779,12 @@ export default function MobileStaffPage() {
                     ยังไม่มีเวรถัดไป
                   </div>
                 ) : (
-                  <div className="mt-3 space-y-3">
+                  <div className="mt-3 space-y-2">
                     {next14.map((r) => (
                       <ShiftCard
                         key={r.shift_instance_id}
                         row={{ ...r, ward_name: wardNameById[r.ward_id] ?? null }}
                         highlight
-                        compact
                         onClick={() => openShift(r.shift_instance_id)}
                         rightBadges={<StatusBadge risk={Boolean(r.risk_flag)} />}
                       />
@@ -837,7 +810,6 @@ export default function MobileStaffPage() {
                       year={wardMonth.year}
                       monthIndex={wardMonth.monthIndex}
                       marks={myWardMarks}
-                      kindCountsByDate={myWardKindCountsByDate}
                       selectedDate={selectedDate}
                       onSelectDate={(d) => setSelectedDate(d)}
                     />
@@ -865,13 +837,12 @@ export default function MobileStaffPage() {
                           ไม่มีเวรของคุณในวันนี้
                         </div>
                       ) : (
-                        <div className="mt-3 space-y-3">
+                        <div className="mt-3 space-y-2">
                           {wardDayShifts.map((r) => (
                             <ShiftCard
                               key={`${r.shift_instance_id}-${(r as any).staff_id ?? "me"}`}
                               row={{ ...r, ward_name: wardNameById[r.ward_id] ?? null }}
                               highlight
-                              compact
                               onClick={() => openShift(r.shift_instance_id)}
                               rightBadges={<StatusBadge risk={Boolean(r.risk_flag)} />}
                             />
