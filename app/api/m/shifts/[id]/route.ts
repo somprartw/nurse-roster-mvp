@@ -16,6 +16,19 @@ type CoworkerRow = {
   } | null;
 };
 
+// ---- Added: raw types from Supabase (staff may be object OR array) ----
+type CoworkerStaff = {
+  id: string;
+  display_name: string;
+  position: string;
+};
+
+type CoworkerRowRaw = {
+  staff_id: string;
+  role_in_shift: string | null;
+  staff?: CoworkerStaff | CoworkerStaff[] | null;
+};
+
 export async function GET(
   req: Request,
   { params }: { params: Promise<{ id: string }> }
@@ -27,7 +40,11 @@ export async function GET(
   // Guard: bad id (e.g. "undefined")
   if (!UUID_RE.test(shiftInstanceId)) {
     return NextResponse.json(
-      { error: "bad_request", detail: "invalid shift_instance_id", received: shiftInstanceId },
+      {
+        error: "bad_request",
+        detail: "invalid shift_instance_id",
+        received: shiftInstanceId,
+      },
       { status: 400 }
     );
   }
@@ -70,8 +87,10 @@ export async function GET(
       { status: 500 }
     );
   }
-  if (!staff) return NextResponse.json({ error: "staff_not_found" }, { status: 404 });
-  if (staff.is_active === false) return NextResponse.json({ error: "staff_inactive" }, { status: 403 });
+  if (!staff)
+    return NextResponse.json({ error: "staff_not_found" }, { status: 404 });
+  if (staff.is_active === false)
+    return NextResponse.json({ error: "staff_inactive" }, { status: 403 });
 
   // 3) Detail (schema-accurate)
   const { data: detailRow, error: detailErr } = await supabase
@@ -109,7 +128,10 @@ export async function GET(
     .maybeSingle();
 
   if (detailErr) {
-    return NextResponse.json({ error: "query_failed", detail: detailErr.message }, { status: 500 });
+    return NextResponse.json(
+      { error: "query_failed", detail: detailErr.message },
+      { status: 500 }
+    );
   }
   if (!detailRow || !detailRow.shift_instances) {
     return NextResponse.json({ error: "not_found" }, { status: 404 });
@@ -137,14 +159,22 @@ export async function GET(
 
   const coworker_limited = Boolean(coworkerErr);
 
-  const coworkers = ((coworkerRows ?? []) as CoworkerRow[])
-    .map((r) => ({
-      staff_id: r.staff_id,
-      display_name: r.staff?.display_name ?? null,
-      position: r.staff?.position ?? null,
-      role_in_shift: r.role_in_shift ?? null,
-    }))
-    .sort((a, b) => String(a.display_name ?? "").localeCompare(String(b.display_name ?? "")));
+  // ---- Fixed: normalize staff (may be object OR array OR null) ----
+  const coworkers = (coworkerRows ?? [])
+    .map((r: CoworkerRowRaw) => {
+      const staffObj =
+        Array.isArray(r.staff) ? (r.staff[0] ?? null) : (r.staff ?? null);
+
+      return {
+        staff_id: r.staff_id,
+        display_name: staffObj?.display_name ?? null,
+        position: staffObj?.position ?? null,
+        role_in_shift: r.role_in_shift ?? null,
+      };
+    })
+    .sort((a, b) =>
+      String(a.display_name ?? "").localeCompare(String(b.display_name ?? ""))
+    );
 
   // 5) Response shape ตรงกับ ShiftDetailResponse ใน UI
   return NextResponse.json({
