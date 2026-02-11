@@ -18,12 +18,12 @@ export const metadata: Metadata = {
   description: "ระบบจัดการตารางเวรสำหรับทีมงาน",
   manifest: "/manifest.webmanifest",
   icons: {
-    apple: "/apple-touch-icon.png",
-    icon: [
-      { url: "/icon-192.png", sizes: "192x192", type: "image/png" },
-      { url: "/icon-512.png", sizes: "512x512", type: "image/png" }
-    ]
-  }
+    // iPhone Add to Home Screen
+    apple: "/apple-touch-icon.png?v=2",
+
+    // Browser tab favicon (16/32 inside .ico)
+    icon: [{ url: "/favicon.ico" }],
+  },
 };
 
 export default function RootLayout({
@@ -33,9 +33,8 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
-      <body
-        className={`${geistSans.variable} ${geistMono.variable} antialiased`}
-      ><SWRegister />
+      <body className={`${geistSans.variable} ${geistMono.variable} antialiased`}>
+        <SWRegister />
         {children}
       </body>
     </html>
