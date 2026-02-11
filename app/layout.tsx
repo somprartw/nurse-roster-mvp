@@ -14,7 +14,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "MVP ตารางเวร",
+  title: "Nurse Roster",
   description: "ระบบจัดการตารางเวรสำหรับทีมงาน",
   manifest: "/manifest.webmanifest",
   icons: {
